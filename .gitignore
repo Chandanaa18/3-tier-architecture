@@ -1,0 +1,29 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Node dependencies & builds
+node_modules/
+dist/
+frontend/node_modules/
+frontend/dist/
+
+# Python cache & build outputs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+
+# Environment files
+.env
+.env.local
+*.env
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+get-pip.py
