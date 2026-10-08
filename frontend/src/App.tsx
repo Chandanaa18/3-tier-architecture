@@ -31,6 +31,8 @@ export const App: React.FC = () => {
   const [activeRequests, setActiveRequests] = useState<ActiveRequest[]>([]);
   const [toasts, setToasts] = useState<ToastAlert[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [jwtToken, setJwtToken] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<string>('Harsha');
 
   const inputRef = useRef<HTMLInputElement>(null);
   const activeStreamsRef = useRef<{ [key: string]: EventSource }>({});
@@ -43,8 +45,28 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
-    addLog('Multi-Layer Validated 3-Tier Application ready.', 'info');
+    addLog('Multi-Layer Validated 3-Tier Application initializing...', 'info');
     inputRef.current?.focus();
+
+    // Perform automatic JWT Authentication on app load
+    fetch('http://localhost:8000/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'Harsha', password: 'securepassword123' })
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.access_token) {
+          setJwtToken(data.access_token);
+          setCurrentUser(data.user);
+          addLog(`🔑 JWT Authenticated as '${data.user}'. Bearer Token issued!`, 'success');
+        } else {
+          addLog('Failed to acquire JWT Token', 'error');
+        }
+      })
+      .catch((err) => {
+        addLog(`JWT Login Error: ${err.message}`, 'error');
+      });
 
     // Live ticker for elapsed seconds on active in-flight requests
     timerRef.current = window.setInterval(() => {
@@ -97,6 +119,12 @@ export const App: React.FC = () => {
     e.preventDefault();
     const cleanName = nameInput.trim();
 
+    if (!jwtToken) {
+      addLog('Authentication Error: Cannot submit without a valid JWT Token.', 'error');
+      setValidationError('⚠️ Not authenticated. Waiting for JWT Token...');
+      return;
+    }
+
     // FRONTEND VALIDATION CHECK BEFORE DISPATCHING
     if (!cleanName) {
       setValidationError('⚠️ Please enter a name.');
@@ -125,20 +153,20 @@ export const App: React.FC = () => {
     const newRequestId = crypto.randomUUID();
     const startTime = Date.now();
 
-    addLog(`[Submit] Dispatched request for '${cleanName}' (ID: ${newRequestId.substring(0, 8)}...)`, 'info');
+    addLog(`[Submit] Dispatched request for '${cleanName}' by user '${currentUser}' (ID: ${newRequestId.substring(0, 8)}...)`, 'info');
 
     const newReqItem: ActiveRequest = {
       id: newRequestId,
       name: cleanName,
       startTime,
       elapsedSeconds: 0,
-      status: 'Connecting SSE Stream...',
+      status: 'Connecting Authenticated SSE Stream...',
       step: 1,
     };
     setActiveRequests((prev) => [...prev, newReqItem]);
 
-    // 1. Establish Native SSE stream for this request_id
-    const sseUrl = `http://localhost:8000/api/stream/${newRequestId}`;
+    // 1. Establish Native SSE stream for this request_id with JWT token
+    const sseUrl = `http://localhost:8000/api/stream/${newRequestId}?token=${encodeURIComponent(jwtToken)}`;
     const eventSource = new EventSource(sseUrl);
     activeStreamsRef.current[newRequestId] = eventSource;
 
@@ -153,10 +181,13 @@ export const App: React.FC = () => {
         );
 
         if (step === 1) {
-          // SSE Connected! Send Native fetch() POST to Middleware
+          // SSE Connected! Send Native fetch() POST to Middleware with Authorization Bearer header
           fetch('http://localhost:8000/api/process', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${jwtToken}`
+            },
             body: JSON.stringify({ name: cleanName, request_id: newRequestId }),
           })
             .then(async (res) => {
@@ -243,12 +274,12 @@ export const App: React.FC = () => {
 
       <header className="header">
         <h1>Multi-Layer Validated 3-Tier Architecture</h1>
-        <p>Instant Frontend Validation + Middleware Edge Security + Backend Data Integrity</p>
+        <p>Instant Frontend Validation + JWT Middleware Auth + Backend Data Integrity</p>
         <div className="badge-row">
           <span className="tech-badge"><span className="dot"></span>React Frontend Validation</span>
+          <span className="tech-badge"><span className="dot"></span>JWT Bearer Auth ({currentUser})</span>
           <span className="tech-badge"><span className="dot"></span>FastAPI Middleware Security</span>
           <span className="tech-badge"><span className="dot"></span>FastAPI Backend Pydantic Check</span>
-          <span className="tech-badge"><span className="dot"></span>Min 3 Letters Rule</span>
         </div>
       </header>
 

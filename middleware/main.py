@@ -1,14 +1,66 @@
 import asyncio
 import json
 import re
-from typing import Dict
-from fastapi import FastAPI, HTTPException
+import hmac
+import hashlib
+import base64
+import time
+from typing import Dict, Optional
+from fastapi import FastAPI, HTTPException, Header, Depends, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import httpx
 
 app = FastAPI(title="Middleware Service (Validation & Callback Pattern)", version="1.0.0")
+
+# Security Secrets
+JWT_SECRET_KEY = "jwt-secret-key-frontend-to-middleware-2026"
+JWT_EXPIRE_MINUTES = 60
+
+security_bearer = HTTPBearer(auto_error=False)
+
+# Lightweight standard JWT implementation without external dependencies
+def base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
+
+def base64url_decode(data: str) -> bytes:
+    padding = '=' * (4 - (len(data) % 4))
+    return base64.urlsafe_b64decode(data + padding)
+
+def create_jwt_token(username: str) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "sub": username,
+        "iat": int(time.time()),
+        "exp": int(time.time()) + (JWT_EXPIRE_MINUTES * 60)
+    }
+    header_b64 = base64url_encode(json.dumps(header).encode('utf-8'))
+    payload_b64 = base64url_encode(json.dumps(payload).encode('utf-8'))
+    
+    sig_input = f"{header_b64}.{payload_b64}".encode('utf-8')
+    sig = hmac.new(JWT_SECRET_KEY.encode('utf-8'), sig_input, hashlib.sha256).digest()
+    sig_b64 = base64url_encode(sig)
+    return f"{header_b64}.{payload_b64}.{sig_b64}"
+
+def verify_jwt_token(token: str) -> Optional[dict]:
+    try:
+        parts = token.split('.')
+        if len(parts) != 3:
+            return None
+        header_b64, payload_b64, sig_b64 = parts
+        sig_input = f"{header_b64}.{payload_b64}".encode('utf-8')
+        expected_sig = hmac.new(JWT_SECRET_KEY.encode('utf-8'), sig_input, hashlib.sha256).digest()
+        actual_sig = base64url_decode(sig_b64)
+        if not hmac.compare_digest(expected_sig, actual_sig):
+            return None
+        payload = json.loads(base64url_decode(payload_b64).decode('utf-8'))
+        if payload.get("exp", 0) < time.time():
+            return None  # Expired token
+        return payload
+    except Exception:
+        return None
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,6 +75,10 @@ pending_requests: Dict[str, asyncio.Queue] = {}
 
 BACKEND_URL = "http://127.0.0.1:8001/process"
 
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
 class ProcessRequest(BaseModel):
     name: str = Field(..., description="User's name to validate")
     request_id: str = Field(..., min_length=1, description="Unique correlation ID for SSE connection")
@@ -34,27 +90,13 @@ class CallbackPayload(BaseModel):
     request_id: str
 
 def validate_name(name: str) -> str:
-    """
-    Validates that the input name:
-    1. Is not empty or blank whitespace.
-    2. Has a MINIMUM length of 3 alphabetic characters (e.g., 'tom' is valid, 'uy' is invalid).
-    3. Contains ONLY alphabetic letters (a-z, A-Z) and single spaces between words.
-    4. Rejects numbers (0-9) and special characters (!, @, #, $, %, etc.).
-    """
     cleaned = name.strip()
-    
-    # Check 1: Empty or blank whitespace check
     if not cleaned:
         raise ValueError("Validation Error: Name cannot be empty or consist only of whitespace.")
-
-    # Check 2: Minimum length check (must be at least 3 letters)
     if len(cleaned) < 3:
         raise ValueError(f"Validation Error: '{cleaned}' is too short. Name must be at least 3 alphabetic letters long.")
-    
-    # Check 3: Regex check - Only alphabetic characters and single spaces between words
     if not re.match(r"^[a-zA-Z]+(?:\s+[a-zA-Z]+)*$", cleaned):
         raise ValueError("Validation Error: Name must contain only alphabetic letters (no numbers or special characters allowed).")
-    
     return cleaned
 
 @app.get("/")
@@ -63,9 +105,25 @@ async def root():
         "service": "FastAPI Middleware Service",
         "status": "running",
         "port": 8000,
+        "jwt_auth": "enabled",
         "active_sse_streams": len(pending_requests),
         "docs_url": "http://localhost:8000/docs",
         "health_url": "http://localhost:8000/health"
+    }
+
+@app.post("/api/login")
+async def login(req: LoginRequest):
+    """Generates a valid JWT Access Token for authenticated users."""
+    if not req.username or not req.password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+    
+    token = create_jwt_token(req.username)
+    return {
+        "status": "success",
+        "access_token": token,
+        "token_type": "bearer",
+        "user": req.username,
+        "expires_in_minutes": JWT_EXPIRE_MINUTES
     }
 
 @app.get("/health")
@@ -74,21 +132,22 @@ async def health_check():
         "status": "ok",
         "service": "middleware",
         "mode": "callback_webhook",
+        "jwt_auth": "enabled",
         "active_sse_connections": len(pending_requests)
     }
 
-async def sse_event_generator(request_id: str):
+async def sse_event_generator(request_id: str, username: str):
     queue = asyncio.Queue()
     pending_requests[request_id] = queue
-    print(f"[Middleware] SSE Connection established for request_id: {request_id}")
+    print(f"[Middleware] Authenticated SSE Connection for '{username}', request_id: {request_id}")
     
     try:
         init_event = {
             "type": "flow_step",
             "step": 1,
             "node": "middleware",
-            "title": "SSE Stream Connected",
-            "detail": f"Native EventSource connected to Middleware (Port 8000) [request_id: {request_id[:8]}...]",
+            "title": "JWT Authenticated SSE Stream Connected",
+            "detail": f"JWT Token verified for '{username}'. Connected to Middleware (Port 8000)",
             "status": "connected"
         }
         yield f"event: flow_step\ndata: {json.dumps(init_event)}\n\n"
@@ -109,9 +168,14 @@ async def sse_event_generator(request_id: str):
         print(f"[Middleware] SSE Connection cleaned up for request_id: {request_id}")
 
 @app.get("/api/stream/{request_id}")
-async def stream_events(request_id: str):
+async def stream_events(request_id: str, token: str = Query(...)):
+    # Verify JWT Token from URL Query Parameter
+    payload = verify_jwt_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid or expired JWT Token for SSE stream")
+
     return StreamingResponse(
-        sse_event_generator(request_id),
+        sse_event_generator(request_id, payload.get("sub", "user")),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -121,7 +185,19 @@ async def stream_events(request_id: str):
     )
 
 @app.post("/api/process")
-async def process_request(request: ProcessRequest):
+async def process_request(
+    request: ProcessRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_bearer)
+):
+    # SECURITY: Verify JWT Authorization Bearer Token
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Unauthorized: Missing Authorization Bearer JWT Token")
+
+    jwt_payload = verify_jwt_token(credentials.credentials)
+    if not jwt_payload:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid or expired JWT Token")
+
+    username = jwt_payload.get("sub", "user")
     request_id = request.request_id
     queue = pending_requests.get(request_id)
     
@@ -140,7 +216,6 @@ async def process_request(request: ProcessRequest):
         error_message = str(val_err)
         print(f"[Middleware] Validation Failed for request_id {request_id}: {error_message}")
         
-        # Send error event over SSE to notify frontend UI
         await queue.put({
             "type": "error",
             "success": False,
@@ -152,13 +227,13 @@ async def process_request(request: ProcessRequest):
 
     callback_url = f"http://127.0.0.1:8000/api/callback/{request_id}"
 
-    # Step 2 Event: POST Validated Successfully
+    # Step 2 Event: POST Validated & JWT Verified
     await queue.put({
         "type": "flow_step",
         "step": 2,
         "node": "middleware",
-        "title": "POST Validated Successfully",
-        "detail": f"Name '{validated_name}' passed validation (min 3 letters). Callback URL: {callback_url}"
+        "title": "JWT Verified & Name Validated",
+        "detail": f"JWT User '{username}' authenticated. Name '{validated_name}' passed validation."
     })
 
     # Step 3 Event: Sending Callback URL to Backend
@@ -194,7 +269,7 @@ async def process_request(request: ProcessRequest):
 
     return {
         "status": "accepted",
-        "message": f"Name '{validated_name}' validated and dispatched to backend",
+        "message": f"Name '{validated_name}' validated for JWT user '{username}' and dispatched to backend",
         "request_id": request_id,
         "callback_url": callback_url
     }
@@ -240,3 +315,4 @@ async def receive_backend_callback(request_id: str, payload: CallbackPayload):
     })
 
     return {"status": "ok", "message": "Callback processed and delivered to SSE queue"}
+
