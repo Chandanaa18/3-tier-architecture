@@ -1,5 +1,17 @@
 # Simple Architecture & System Summary
 
+## 📐 Architecture Diagram
+
+```mermaid
+flowchart LR
+    A["React Frontend (5173)"] -->|1. Submit Request| B["FastAPI Middleware (8000)"]
+    B -->|2. Validate & Forward| C["FastAPI Backend (8001)"]
+    C -.->|3. Async Webhook Callback| B
+    B -.->|4. Real-time SSE Push| A
+```
+
+---
+
 ## 🟢 Overview
 A 3-Tier Web Application featuring **JWT Authentication**, **2-Layer Input Validation**, **Asynchronous Background Processing**, **Webhook Callbacks**, and **Real-Time Server-Sent Events (SSE)**.
 
