@@ -15,9 +15,9 @@ import httpx
 
 app = FastAPI(title="Middleware Service (Validation & Callback Pattern)", version="1.0.0")
 
-# Security Secrets
-JWT_SECRET_KEY = "jwt-secret-key-frontend-to-middleware-2026"
-JWT_EXPIRE_MINUTES = 60
+# Security Secrets from Environment
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "jwt-secret-key-frontend-to-middleware-2026")
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 
 security_bearer = HTTPBearer(auto_error=False)
 
@@ -70,10 +70,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import os
+
 # In-memory dictionary mapping request_id -> asyncio.Queue
 pending_requests: Dict[str, asyncio.Queue] = {}
 
-BACKEND_URL = "http://127.0.0.1:8001/process"
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001/process")
+MIDDLEWARE_HOST = os.getenv("MIDDLEWARE_HOST", "http://127.0.0.1:8000")
 
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1)
@@ -92,12 +95,12 @@ class CallbackPayload(BaseModel):
 def validate_name(name: str) -> str:
     cleaned = name.strip()
     if not cleaned:
-        raise ValueError("Validation Error: Name cannot be empty or consist only of whitespace.")
-    if len(cleaned) < 3:
-        raise ValueError(f"Validation Error: '{cleaned}' is too short. Name must be at least 3 alphabetic letters long.")
-    if not re.match(r"^[a-zA-Z]+(?:\s+[a-zA-Z]+)*$", cleaned):
-        raise ValueError("Validation Error: Name must contain only alphabetic letters (no numbers or special characters allowed).")
+        raise ValueError("Validation Error: Input cannot be empty or consist only of whitespace.")
+    if not re.search(r"[a-zA-Z0-9]", cleaned):
+        raise ValueError("Validation Error: Input cannot consist only of special characters.")
+    
     return cleaned
+
 
 @app.get("/")
 async def root():
@@ -225,7 +228,7 @@ async def process_request(
         
         raise HTTPException(status_code=400, detail=error_message)
 
-    callback_url = f"http://127.0.0.1:8000/api/callback/{request_id}"
+    callback_url = f"{MIDDLEWARE_HOST}/api/callback/{request_id}"
 
     # Step 2 Event: POST Validated & JWT Verified
     await queue.put({

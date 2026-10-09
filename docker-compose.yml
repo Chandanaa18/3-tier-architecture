@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: 3tier_backend
+    ports:
+      - "8001:8001"
+    environment:
+      - TOXICITY_THRESHOLD=0.5
+    restart: unless-stopped
+
+  middleware:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    container_name: 3tier_middleware
+    ports:
+      - "8000:8000"
+    environment:
+      - BACKEND_URL=http://backend:8001/process
+      - MIDDLEWARE_HOST=http://middleware:8000
+      - JWT_SECRET_KEY=jwt-secret-key-frontend-to-middleware-2026
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: 3tier_frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_MIDDLEWARE_URL=http://localhost:8000
+    depends_on:
+      - middleware
+    restart: unless-stopped

@@ -25,14 +25,22 @@ interface ToastAlert {
   timeStr: string;
 }
 
+const MIDDLEWARE_URL = (import.meta as any).env?.VITE_MIDDLEWARE_URL || 'http://localhost:8000';
+
 export const App: React.FC = () => {
   const [nameInput, setNameInput] = useState<string>('');
   const [validationError, setValidationError] = useState<string | null>(null);
   const [activeRequests, setActiveRequests] = useState<ActiveRequest[]>([]);
   const [toasts, setToasts] = useState<ToastAlert[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  
+  // Authentication & Login UI State
   const [jwtToken, setJwtToken] = useState<string | null>(null);
-  const [currentUser, setCurrentUser] = useState<string>('Harsha');
+  const [currentUser, setCurrentUser] = useState<string>('');
+  const [loginUsername, setLoginUsername] = useState<string>('Harsha');
+  const [loginPassword, setLoginPassword] = useState<string>('password123');
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState<boolean>(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const activeStreamsRef = useRef<{ [key: string]: EventSource }>({});
@@ -45,28 +53,7 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
-    addLog('Multi-Layer Validated 3-Tier Application initializing...', 'info');
-    inputRef.current?.focus();
-
-    // Perform automatic JWT Authentication on app load
-    fetch('http://localhost:8000/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'Harsha', password: 'securepassword123' })
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.access_token) {
-          setJwtToken(data.access_token);
-          setCurrentUser(data.user);
-          addLog(`🔑 JWT Authenticated as '${data.user}'. Bearer Token issued!`, 'success');
-        } else {
-          addLog('Failed to acquire JWT Token', 'error');
-        }
-      })
-      .catch((err) => {
-        addLog(`JWT Login Error: ${err.message}`, 'error');
-      });
+    addLog('Multi-Layer Validated 3-Tier Application ready.', 'info');
 
     // Live ticker for elapsed seconds on active in-flight requests
     timerRef.current = window.setInterval(() => {
@@ -85,6 +72,53 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  // LOGIN SUBMIT HANDLER
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginUsername.trim() || !loginPassword.trim()) {
+      setLoginError('Please enter both username and password.');
+      return;
+    }
+
+    setIsLoggingIn(true);
+    setLoginError(null);
+
+    try {
+      const res = await fetch(`${MIDDLEWARE_URL}/api/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername.trim(), password: loginPassword.trim() }),
+      });
+
+      const data = await res.json();
+
+      if (res.ok && data.access_token) {
+        setJwtToken(data.access_token);
+        setCurrentUser(data.user);
+        addLog(`🔑 JWT Authenticated as '${data.user}'. Bearer Token issued!`, 'success');
+        setTimeout(() => inputRef.current?.focus(), 100);
+      } else {
+        setLoginError(data.detail || 'Login failed. Please check your credentials.');
+        addLog(`Login Failed: ${data.detail || 'Invalid response'}`, 'error');
+      }
+    } catch (err: any) {
+      setLoginError(`Network Error: Could not connect to Middleware (Port 8000). Is uvicorn running?`);
+      addLog(`Login Connection Error: ${err.message}`, 'error');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  // LOGOUT HANDLER
+  const handleLogout = () => {
+    addLog(`Logged out user '${currentUser}'. JWT token cleared.`, 'warn');
+    setJwtToken(null);
+    setCurrentUser('');
+    Object.values(activeStreamsRef.current).forEach((es) => es.close());
+    activeStreamsRef.current = {};
+    setActiveRequests([]);
+  };
+
   // INSTANT FRONTEND INPUT VALIDATION
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
@@ -97,15 +131,10 @@ export const App: React.FC = () => {
       return;
     }
 
-    if (trimmed.length < 3) {
-      setValidationError("⚠️ Frontend Validation Warning: Name must be at least 3 alphabetic letters long (e.g. 'tom' is valid, 'uy' is too short).");
-      return;
-    }
-
-    // Check for numbers or special characters using regex
-    const nameRegex = /^[a-zA-Z]+(?:\s+[a-zA-Z]+)*$/;
-    if (!nameRegex.test(trimmed)) {
-      setValidationError('⚠️ Frontend Validation Warning: Name must contain only alphabetic letters (no numbers or special characters).');
+    // Only reject if input consists ONLY of special characters (e.g. !!!, @#$)
+    const hasLettersOrNumbers = /[a-zA-Z0-9]/.test(trimmed);
+    if (!hasLettersOrNumbers) {
+      setValidationError('⚠️ Input Warning: Input cannot consist only of special characters.');
     } else {
       setValidationError(null);
     }
@@ -121,27 +150,21 @@ export const App: React.FC = () => {
 
     if (!jwtToken) {
       addLog('Authentication Error: Cannot submit without a valid JWT Token.', 'error');
-      setValidationError('⚠️ Not authenticated. Waiting for JWT Token...');
+      setValidationError('⚠️ Not authenticated. Please login first.');
       return;
     }
 
     // FRONTEND VALIDATION CHECK BEFORE DISPATCHING
     if (!cleanName) {
-      setValidationError('⚠️ Please enter a name.');
-      addLog('Frontend Validation Error: Empty name input.', 'error');
+      setValidationError('⚠️ Please enter an input.');
+      addLog('Frontend Validation Error: Empty input.', 'error');
       return;
     }
 
-    if (cleanName.length < 3) {
-      setValidationError(`⚠️ '${cleanName}' is too short. Name must be at least 3 letters long.`);
-      addLog(`Frontend Validation Error: Rejected '${cleanName}' (too short)`, 'error');
-      return;
-    }
-
-    const nameRegex = /^[a-zA-Z]+(?:\s+[a-zA-Z]+)*$/;
-    if (!nameRegex.test(cleanName)) {
-      setValidationError('⚠️ Name must contain only alphabetic letters (no numbers or symbols).');
-      addLog(`Frontend Validation Error: Rejected '${cleanName}'`, 'error');
+    const hasLettersOrNumbers = /[a-zA-Z0-9]/.test(cleanName);
+    if (!hasLettersOrNumbers) {
+      setValidationError('⚠️ Input Error: Input cannot consist only of special characters.');
+      addLog(`Frontend Validation Error: Rejected '${cleanName}' (special characters only)`, 'error');
       return;
     }
 
@@ -166,7 +189,7 @@ export const App: React.FC = () => {
     setActiveRequests((prev) => [...prev, newReqItem]);
 
     // 1. Establish Native SSE stream for this request_id with JWT token
-    const sseUrl = `http://localhost:8000/api/stream/${newRequestId}?token=${encodeURIComponent(jwtToken)}`;
+    const sseUrl = `${MIDDLEWARE_URL}/api/stream/${newRequestId}?token=${encodeURIComponent(jwtToken)}`;
     const eventSource = new EventSource(sseUrl);
     activeStreamsRef.current[newRequestId] = eventSource;
 
@@ -182,7 +205,7 @@ export const App: React.FC = () => {
 
         if (step === 1) {
           // SSE Connected! Send Native fetch() POST to Middleware with Authorization Bearer header
-          fetch('http://localhost:8000/api/process', {
+          fetch(`${MIDDLEWARE_URL}/api/process`, {
             method: 'POST',
             headers: { 
               'Content-Type': 'application/json',
@@ -274,66 +297,121 @@ export const App: React.FC = () => {
 
       <header className="header">
         <h1>Multi-Layer Validated 3-Tier Architecture</h1>
-        <p>Instant Frontend Validation + JWT Middleware Auth + Backend Data Integrity</p>
+        <p>Instant Frontend Validation + BERT-Mini AI Abuse Guard + JWT Middleware Auth</p>
         <div className="badge-row">
           <span className="tech-badge"><span className="dot"></span>React Frontend Validation</span>
-          <span className="tech-badge"><span className="dot"></span>JWT Bearer Auth ({currentUser})</span>
+          <span className="tech-badge"><span className="dot"></span>JWT Bearer Auth</span>
+          <span className="tech-badge"><span className="dot"></span>BERT-Mini AI Abuse Filter</span>
           <span className="tech-badge"><span className="dot"></span>FastAPI Middleware Security</span>
           <span className="tech-badge"><span className="dot"></span>FastAPI Backend Pydantic Check</span>
         </div>
       </header>
 
-      {/* Input Form with Instant Live Validation */}
-      <div className="form-card">
-        <form onSubmit={handleSubmit}>
-          <div className="input-group">
-            <input
-              ref={inputRef}
-              type="text"
-              className={`input-field ${validationError ? 'input-error' : ''}`}
-              value={nameInput}
-              onChange={handleInputChange}
-              placeholder="Enter name (min 3 letters, e.g. tom, alex, harsha)..."
-            />
-            <button type="submit" className="btn-submit" disabled={!!validationError}>
-              Submit
+
+      {/* RENDER LOGIN SCREEN IF NOT AUTHENTICATED */}
+      {!jwtToken ? (
+        <div className="login-card">
+          <div className="login-header">
+            <h2>🔑 Sign In to 3-Tier Dashboard</h2>
+            <p>Authenticates with Middleware (Port 8000) & receives a signed JWT Bearer Token.</p>
+          </div>
+          <form onSubmit={handleLoginSubmit}>
+            <div className="login-form-group">
+              <div>
+                <label className="input-label">Username</label>
+                <input
+                  type="text"
+                  className="input-field"
+                  value={loginUsername}
+                  onChange={(e) => setLoginUsername(e.target.value)}
+                  placeholder="Enter username..."
+                  required
+                />
+              </div>
+              <div>
+                <label className="input-label">Password</label>
+                <input
+                  type="password"
+                  className="input-field"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="Enter password..."
+                  required
+                />
+              </div>
+            </div>
+            {loginError && <div className="validation-warning-text" style={{ marginBottom: '1rem' }}>{loginError}</div>}
+            <button type="submit" className="btn-login" disabled={isLoggingIn}>
+              {isLoggingIn ? 'Authenticating...' : 'Sign In with JWT'}
+            </button>
+          </form>
+        </div>
+      ) : (
+        <>
+          {/* USER TOP NAVBAR */}
+          <div className="user-nav-bar">
+            <div className="user-info-pill">
+              <div className="user-avatar">{currentUser.charAt(0).toUpperCase()}</div>
+              <span>Logged in as <strong>{currentUser}</strong> (JWT Active)</span>
+            </div>
+            <button className="btn-logout" onClick={handleLogout}>
+              Logout 🔒
             </button>
           </div>
-          {validationError && (
-            <div className="validation-warning-text">{validationError}</div>
-          )}
-        </form>
-      </div>
 
-      {/* Active In-Flight Requests Monitor */}
-      <div className="active-requests-panel">
-        <div className="panel-header">
-          <div className="panel-title">
-            <span>In-Flight Requests (Processing in Backend)</span>
-            <span className="active-count-badge">{activeRequests.length} Active</span>
-          </div>
-        </div>
-
-        {activeRequests.length === 0 ? (
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', padding: '1rem' }}>
-            No active requests. Enter a name above and click <strong>Submit</strong>!
-          </div>
-        ) : (
-          <div className="request-cards-grid">
-            {activeRequests.map((req) => (
-              <div key={req.id} className="req-card">
-                <div className="req-card-header">
-                  <span className="req-name">{req.name}</span>
-                  <span className="req-timer">{req.elapsedSeconds.toFixed(1)}s</span>
-                </div>
-                <div className="req-status-text">
-                  <span className="pulse-dot"></span> {req.status}
-                </div>
+          {/* Input Form with Instant Live Validation */}
+          <div className="form-card">
+            <form onSubmit={handleSubmit}>
+              <div className="input-group">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  className={`input-field ${validationError ? 'input-error' : ''}`}
+                  value={nameInput}
+                  onChange={handleInputChange}
+                  placeholder="Enter name (min 3 letters, e.g. tom, alex, harsha)..."
+                />
+                <button type="submit" className="btn-submit" disabled={!!validationError}>
+                  Submit
+                </button>
               </div>
-            ))}
+              {validationError && (
+                <div className="validation-warning-text">{validationError}</div>
+              )}
+            </form>
           </div>
-        )}
-      </div>
+
+          {/* Active In-Flight Requests Monitor */}
+          <div className="active-requests-panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <span>In-Flight Requests (Processing in Backend)</span>
+                <span className="active-count-badge">{activeRequests.length} Active</span>
+              </div>
+            </div>
+
+            {activeRequests.length === 0 ? (
+              <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'center', padding: '1rem' }}>
+                No active requests. Enter a name above and click <strong>Submit</strong>!
+              </div>
+            ) : (
+              <div className="request-cards-grid">
+                {activeRequests.map((req) => (
+                  <div key={req.id} className="req-card">
+                    <div className="req-card-header">
+                      <span className="req-name">{req.name}</span>
+                      <span className="req-timer">{req.elapsedSeconds.toFixed(1)}s</span>
+                    </div>
+                    <div className="req-status-text">
+                      <span className="pulse-dot"></span> {req.status}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Real-Time Communication Log */}
       <div className="log-console">
@@ -353,3 +431,4 @@ export const App: React.FC = () => {
 };
 
 export default App;
+
