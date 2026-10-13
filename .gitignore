@@ -27,3 +27,7 @@ __pycache__/
 .idea/
 .DS_Store
 get-pip.py
+
+# Local testing and scratch artifacts
+scratch/
+test_safety.sh

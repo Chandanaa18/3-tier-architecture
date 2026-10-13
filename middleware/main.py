@@ -1,3 +1,4 @@
+import os
 import asyncio
 import json
 import re
@@ -70,10 +71,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import os
-
 # In-memory dictionary mapping request_id -> asyncio.Queue
 pending_requests: Dict[str, asyncio.Queue] = {}
+
+# Persistent HTTP Client with Connection Pooling for low-latency (< 5ms) inter-service communication
+http_client = httpx.AsyncClient(
+    limits=httpx.Limits(max_keepalive_connections=100, max_connections=200, keepalive_expiry=60.0),
+    timeout=15.0
+)
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001/process")
 MIDDLEWARE_HOST = os.getenv("MIDDLEWARE_HOST", "http://127.0.0.1:8000")
@@ -250,17 +255,28 @@ async def process_request(
 
     # Send POST to Backend containing callback_url
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                BACKEND_URL,
-                json={
-                    "name": validated_name,
-                    "request_id": request_id,
-                    "callback_url": callback_url
-                },
-                timeout=5.0
-            )
+        resp = await http_client.post(
+            BACKEND_URL,
+            json={
+                "name": validated_name,
+                "request_id": request_id,
+                "callback_url": callback_url
+            },
+            timeout=5.0
+        )
+        if resp.status_code >= 400:
+            err_detail = f"Backend rejected request (HTTP {resp.status_code}): {resp.text}"
+            print(f"[Middleware] Backend Error: {err_detail}")
+            await queue.put({
+                "type": "error",
+                "success": False,
+                "error": err_detail,
+                "request_id": request_id
+            })
+            raise HTTPException(status_code=502, detail=err_detail)
         print(f"[Middleware] Backend acknowledged POST with status {resp.status_code}: {resp.json()}")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[Middleware] Error calling Backend: {e}")
         await queue.put({
@@ -269,6 +285,7 @@ async def process_request(
             "error": f"Failed to post to backend: {str(e)}",
             "request_id": request_id
         })
+        raise HTTPException(status_code=502, detail=f"Failed to connect to backend: {str(e)}")
 
     return {
         "status": "accepted",
@@ -314,6 +331,7 @@ async def receive_backend_callback(request_id: str, payload: CallbackPayload):
             "message": payload.message,
             "delay_seconds": payload.delay_seconds
         },
+        "error": payload.message if not payload.success else None,
         "request_id": request_id
     })
 

@@ -11,10 +11,16 @@ except ImportError:
 
 app = FastAPI(title="Backend Service (Toxicity Classifier & Callback)", version="1.0.0")
 
+# Persistent HTTP Client with Connection Pooling for sub-millisecond callback execution
+http_client = httpx.AsyncClient(
+    limits=httpx.Limits(max_keepalive_connections=100, max_connections=200, keepalive_expiry=60.0),
+    timeout=15.0
+)
+
 @app.on_event("startup")
 async def startup_event():
-    """Load yrrhall/bert-mini-toxicity model once when Backend server starts up."""
-    print("[Backend] Server starting up. Pre-loading BERT-Mini toxicity model...")
+    """Load knowledgator/opir-multitask-multilang-v1.0 model once when Backend server starts up."""
+    print("[Backend] Server starting up. Pre-loading OPIR safety model...")
     load_toxicity_model()
 
 class ProcessPayload(BaseModel):
@@ -50,32 +56,33 @@ async def health_check():
 async def execute_backend_job(name: str, request_id: str, callback_url: str):
     """
     Background task executing:
-    1. Async non-blocking BERT-Mini toxicity classification
-    2. If toxic: return rejection via callback immediately without delay
-    3. If not-toxic: proceed with 5s-12s processing delay and callback completion
+    1. Single-pass Safety classification (Abuse Toxicity + Prompt Injection) via OPIR Model
+    2. If toxic or prompt-injection: return rejection via callback immediately without delay
+    3. If clean: proceed with 5s-12s processing delay and callback completion
     """
-    # 1. Run BERT-Mini toxicity classification asynchronously (using asyncio.to_thread)
-    toxicity_res = await classify_text_async(name, threshold=0.5)
+    # 1. Run Safety classification asynchronously (respects dynamic TOXICITY_THRESHOLD env var)
+    toxicity_res = await classify_text_async(name)
     
-    is_toxic = toxicity_res["is_toxic"]
-    score = toxicity_res["score"]
-    label = toxicity_res["label"]
+    is_toxic = toxicity_res.get("is_toxic", False)
+    is_prompt_injection = toxicity_res.get("is_prompt_injection", False)
+    rejected = toxicity_res.get("rejected", False) or is_toxic or is_prompt_injection
+    engine = toxicity_res.get("engine", "OPIR Safety Guard")
     
-    print(f"[Backend] Toxicity Evaluation for '{name}': label='{label}', score={score:.4f}, is_toxic={is_toxic}")
+    print(f"[Backend] Safety Evaluation for '{name}' [{engine}]: is_toxic={is_toxic}, is_prompt_injection={is_prompt_injection}, rejected={rejected}")
     
-    # 2. Rejection branch for toxic content
-    if is_toxic:
-        print(f"[Backend] REJECTED: Input '{name}' classified as toxic (score={score:.4f}). Skipping processing.")
+    # 2. Rejection branch for toxic or prompt injection content
+    if rejected:
+        reason = "Prompt Injection Attack Detected" if is_prompt_injection else "Toxicity/Abuse Policy Violation"
+        print(f"[Backend] REJECTED: Input '{name}' [{reason}]. Skipping processing delay.")
         rejection_payload = {
             "success": False,
-            "message": "Content rejected: Input text failed toxicity classification policy.",
+            "message": f"Content rejected: Input text failed safety policy ({reason}).",
             "delay_seconds": 0.0,
             "request_id": request_id
         }
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(callback_url, json=rejection_payload, timeout=10.0)
-                print(f"[Backend] Rejection callback sent to Middleware: HTTP {resp.status_code}")
+            resp = await http_client.post(callback_url, json=rejection_payload, timeout=10.0)
+            print(f"[Backend] Rejection callback sent to Middleware: HTTP {resp.status_code}")
         except Exception as e:
             print(f"[Backend] Error executing rejection callback to {callback_url}: {e}")
         return
@@ -97,9 +104,8 @@ async def execute_backend_job(name: str, request_id: str, callback_url: str):
     }
     
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(callback_url, json=callback_payload, timeout=10.0)
-            print(f"[Backend] Callback response from Middleware: HTTP {resp.status_code}")
+        resp = await http_client.post(callback_url, json=callback_payload, timeout=10.0)
+        print(f"[Backend] Callback response from Middleware: HTTP {resp.status_code}")
     except Exception as e:
         print(f"[Backend] Error executing Callback to {callback_url}: {e}")
 

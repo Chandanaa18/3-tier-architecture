@@ -1,6 +1,6 @@
 # 3-Tier Asynchronous Architecture Application
 
-A modern 3-tier web application built with **React (TypeScript)**, **FastAPI (Middleware)**, and **FastAPI (Backend)** featuring multi-layer input validation, Server-Sent Events (SSE) for real-time updates, and asynchronous webhook callback notifications.
+A modern, production-ready 3-tier web application built with **React (TypeScript)**, **FastAPI (Middleware Gateway)**, and **FastAPI (Backend Worker & Safety Guard)** featuring multi-layer input sanitization, zero-shot neural toxicity & prompt injection filtering, Server-Sent Events (SSE) for real-time streaming, and an asynchronous webhook callback notification pattern.
 
 ---
 
@@ -11,41 +11,42 @@ A modern 3-tier web application built with **React (TypeScript)**, **FastAPI (Mi
 ```mermaid
 graph TD
     subgraph Client ["Client Layer (Port 5173)"]
-        UI["React + Vite UI"]
+        UI["React 18 + Vite UI"]
         ES["Native EventSource (SSE Listener)"]
     end
 
-    subgraph MiddlewareLayer ["Middleware Layer (Port 8000)"]
+    subgraph MiddlewareLayer ["Middleware Gateway (Port 8000)"]
         AUTH["JWT Authentication (/api/login)"]
-        VAL1["Input Sanitization & Validation"]
+        VAL1["Layer-1: Input Sanitization & Validation"]
         SSE_MGR["SSE Event Queue Manager"]
         WEBHOOK["Callback Webhook Receiver (/api/callback/{id})"]
     end
 
-    subgraph BackendLayer ["Backend Layer (Port 8001)"]
-        VAL2["Pydantic Schema Validator"]
+    subgraph BackendLayer ["Backend Worker & Safety Guard (Port 8001)"]
+        VAL2["Layer-2: Pydantic Schema Validator"]
+        SAFETY["Layers 3 & 4: Fast Filter + OPIR Safety Guard"]
         WORKER["Async Background Job (5s - 12s delay)"]
         CLIENT["HTTPX Async Client (Webhook Trigger)"]
     end
 
     UI -->|1. Auth POST /api/login| AUTH
-    UI -->|2. Establish SSE Connection| ES
-    ES <-->|Real-time Stream /api/stream/{id}| SSE_MGR
+    UI -->|2. Establish SSE Connection /api/stream/{id}| ES
+    ES <-->|Real-time Stream| SSE_MGR
     UI -->|3. Submit Request POST /api/process| VAL1
     VAL1 -->|4. Forward Request + Callback URL| VAL2
     VAL2 -->|5. Immediate 202 Accepted| UI
-    VAL2 -->|6. Spawn Task| WORKER
+    VAL2 -->|6. Run Safety Evaluation| SAFETY
+    SAFETY -->|If Toxic: Immediate Rejection| CLIENT
+    SAFETY -->|If Clean: Execute 5s-12s Task| WORKER
     WORKER -->|7. Task Complete| CLIENT
     CLIENT -->|8. POST Webhook Data| WEBHOOK
-    WEBHOOK -->|9. Push Event| SSE_MGR
-    SSE_MGR -->|10. Stream Update| ES
+    WEBHOOK -->|9. Push Event to Queue| SSE_MGR
+    SSE_MGR -->|10. Stream Update to Browser| ES
 ```
 
 ---
 
 ### 2. Asynchronous Sequence Diagram
-
-The system uses an asynchronous callback pattern to handle long-running backend processing without blocking HTTP connections:
 
 ```mermaid
 sequenceDiagram
@@ -59,29 +60,40 @@ sequenceDiagram
     User->>MW: 2. Connect EventSource (SSE Stream) [/api/stream/{request_id}?token=JWT]
     MW-->>User: 3. SSE Stream Established
     User->>MW: 4. POST /api/process (name, request_id) + Bearer JWT
-    MW->>MW: 5. Layer 1 Validation (alphabetic, min 3 chars)
+    MW->>MW: 5. Layer 1 Validation (non-empty, alphanumeric check)
     MW->>BE: 6. Forward POST /process + callback_url
-    BE->>BE: 7. Layer 2 Validation (Pydantic)
-    BE-->>MW: 8. Return 202 Accepted (Immediate)
+    BE->>BE: 7. Layer 2 Validation (Pydantic Schema)
+    BE-->>MW: 8. Return HTTP 202 Accepted (Immediate)
     MW-->>User: 9. Return HTTP 202 Accepted
-    Note over BE: Asynchronous Job (5s - 12s simulated delay)
-    BE->>MW: 10. Webhook POST Callback [/api/callback/{request_id}]
-    MW->>User: 11. Push SSE Event (Notification & Result)
+    
+    alt Safety Rejection (Direct Attack / Severe Profanity / Prompt Injection)
+        BE->>BE: Fast Pre-Filter or OPIR Neural Flag: REJECTED
+        BE->>MW: 10a. Immediate Webhook POST [/api/callback/{request_id}] (delay: 0s, success: false)
+        MW->>User: 11a. Push SSE Rejection Notification
+    else Clean Input (Safe)
+        BE->>BE: Fast Pre-Filter & OPIR Neural Flag: ALLOWED
+        Note over BE: Asynchronous Background Job (5s - 12s simulated delay)
+        BE->>MW: 10b. Webhook POST Callback [/api/callback/{request_id}] (delay: 5-12s, success: true)
+        MW->>User: 11b. Push SSE Success Notification & Result
+    end
 ```
 
 ---
 
 ## ✨ Features
 
-- **Multi-Layer Input Validation:**
-  - **Middleware Validation:** Client requests are sanitized and checked for minimum length (at least 3 characters) and allowed characters (alphabetic letters only).
-  - **Backend Validation:** Pydantic models enforce schema rules before starting asynchronous execution.
-- **Asynchronous Webhook Pattern:**
-  - Backend immediately returns `202 Accepted` to free resources while running a background task (5s to 12s execution time).
-  - Upon task completion, Backend invokes a POST callback URL provided by the Middleware.
-- **Real-Time Client Updates:**
-  - The React frontend establishes a native `EventSource` connection for Server-Sent Events (SSE).
-  - Webhook results trigger instant UI updates without polling.
+- **Multi-Layer Input Validation & AI Safety Guard:**
+  - **Layer 1 (Middleware):** Sanitizes inputs and ensures non-empty strings with valid alphanumeric characters.
+  - **Layer 2 (Backend):** Pydantic schemas validate request payloads, correlation IDs, and callback URLs.
+  - **Layer 3 (Fast Pre-Filter):** Instant sub-millisecond pattern matching for direct slurs, obfuscated profanities, targeted harassment, and prompt injection attacks (`ignore all previous instructions`).
+  - **Layer 4 (OPIR Neural Guard):** Deep zero-shot semantic safety classification using `knowledgator/opir-multitask-multilang-v1.0` optimized on CPU (`torch.set_num_threads(4)`).
+- **Asynchronous Webhook Callback Pattern:**
+  - Backend immediately returns `202 Accepted` to free HTTP connections.
+  - Safe requests execute in the background with a 5s to 12s simulated processing delay.
+  - Unsafe requests bypass processing delays and trigger an immediate rejection webhook (`delay: 0s`).
+- **Real-Time Client Updates (SSE):**
+  - The React frontend establishes a native `EventSource` connection for Server-Sent Events.
+  - Webhook results trigger instant UI updates and toast notifications without client polling.
 
 ---
 
@@ -89,9 +101,9 @@ sequenceDiagram
 
 | Layer | Technology | Port |
 | :--- | :--- | :--- |
-| **Frontend** | React 18, TypeScript, Vite | `5173` |
-| **Middleware** | FastAPI, Uvicorn, HTTPX, Pydantic | `8000` |
-| **Backend** | FastAPI, Uvicorn, Asyncio, Pydantic | `8001` |
+| **Frontend** | React 18, TypeScript, Vite, Vanilla CSS | `5173` |
+| **Middleware** | FastAPI, Uvicorn, HTTPX, Pydantic, Native JWT | `8000` |
+| **Backend** | FastAPI, Uvicorn, PyTorch, GLiClass, Transformers | `8001` |
 
 ---
 
@@ -100,17 +112,19 @@ sequenceDiagram
 ```
 .
 ├── backend/
-│   ├── main.py              # Backend FastAPI app (Async processing & webhooks)
+│   ├── main.py              # Backend FastAPI app (Safety guard & async job dispatcher)
+│   ├── toxicity.py          # OPIR Neural Guard & Fast Pattern Filter
 │   └── requirements.txt     # Python dependencies for Backend
 ├── middleware/
-│   ├── main.py              # Middleware FastAPI app (Validation & SSE manager)
+│   ├── main.py              # Middleware FastAPI app (JWT Auth, Layer-1 Validation, SSE Manager)
 │   └── requirements.txt     # Python dependencies for Middleware
 ├── frontend/
-│   ├── src/                 # React UI components & styling
+│   ├── src/                 # React UI components, styles & EventSource logic
 │   ├── index.html
 │   ├── package.json         # Node.js dependencies
 │   └── vite.config.ts
-├── .gitignore               # Ignored files (venv, node_modules, .env, etc.)
+├── ARCHITECTURE.md          # Comprehensive Architecture & Flow Specifications
+├── test_safety.sh           # One-command safety test & benchmark runner
 └── README.md                # Project documentation
 ```
 
@@ -132,26 +146,26 @@ cd backend
 python -m venv venv
 source venv/bin/activate    # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --host 127.0.0.1 --port 8001 --reload
+PYTHONPATH=".." uvicorn main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-*Backend API docs available at: `http://127.0.0.1:8001/docs`*
+*Backend API docs available at: `http://localhost:8001/docs`*
 
 ---
 
 ### Step 2: Set Up & Run Middleware Service
 
-Open a new terminal window:
+Open a second terminal window:
 
 ```bash
 cd middleware
 python -m venv venv
 source venv/bin/activate    # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+PYTHONPATH=".." uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-*Middleware API docs available at: `http://127.0.0.1:8000/docs`*
+*Middleware API docs available at: `http://localhost:8000/docs`*
 
 ---
 
@@ -173,31 +187,29 @@ npm run dev
 
 ### Middleware Endpoints (`Port 8000`)
 
-- `GET /health` – Health check status.
-- `POST /api/login` – Generates JWT Access Token.
-- `GET /api/stream/{request_id}` – SSE stream connection for client events.
+- `GET /health` – Health check status & active SSE count.
+- `POST /api/login` – Accepts `{ username, password }`, generates JWT Access Token.
+- `GET /api/stream/{request_id}?token=JWT` – SSE stream connection for client events.
 - `POST /api/process` – Accepts `{ name, request_id }`, validates name, and forwards request to backend.
-- `POST /api/callback/{request_id}` – Webhook endpoint called by backend upon job completion.
+- `POST /api/callback/{request_id}` – Webhook endpoint called by backend upon job completion or safety rejection.
 
 ### Backend Endpoints (`Port 8001`)
 
 - `GET /health` – Backend health check.
-- `POST /process` – Accepts validated payload and `callback_url`, spawns async background task, returns `202 Accepted`.
+- `POST /process` – Accepts `{ name, request_id, callback_url }`, runs safety evaluation, spawns background task, returns `202 Accepted`.
 
 ---
 
-## 🌿 Git Workflow & Branching
+## 🧪 Safety Evaluation & Benchmarks
 
-To work on new features, follow this branch workflow:
+To run the comprehensive safety benchmark across the dataset:
 
 ```bash
-# 1. Create and switch to a new branch
-git checkout -b feature/your-feature-name
+./test_safety.sh
+```
 
-# 2. Stage and commit your changes
-git add .
-git commit -m "Description of changes"
+To run the synonym and paraphrase generalization test:
 
-# 3. Push the new branch to GitHub
-git push -u origin feature/your-feature-name
+```bash
+python3 scratch/test_synonyms_and_paraphrases.py
 ```

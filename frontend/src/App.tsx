@@ -253,7 +253,8 @@ export const App: React.FC = () => {
           };
           setToasts((prev) => [newToast, ...prev]);
         } else {
-          addLog(`Error for '${cleanName}': ${payload.error}`, 'error');
+          const errorDetail = payload.error || payload.data?.message || payload.message || 'Processing failed';
+          addLog(`Content Flagged/Error for '${cleanName}': ${errorDetail}`, 'error');
         }
 
         // Cleanup SSE stream
